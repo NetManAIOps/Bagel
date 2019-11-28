@@ -8,15 +8,75 @@ from torch.nn.utils import clip_grad_norm_
 from torch.optim import Adam
 from torch.optim.lr_scheduler import StepLR
 
-from kpi_anomaly_detection.evaluation_metric import ignore_missing
+from evaluation_metric import ignore_missing
 from network import MultiLinearGaussianStatistic
 from network.loop import Loop, TestLoop
 from torch_util import VstackDataset
-from .donutx import CVAE, m_elbo, mcmc_missing_imputation, VAE, BasicVAE
-from .kpi_frame_dataloader import KpiFrameDataLoader
-from .kpi_frame_dataset import TimestampDataset, KpiFrameDataset
-from .kpi_series import KPISeries
-from .threshold_selection import threshold_map, threshold_prior
+from donutx import CVAE, m_elbo, mcmc_missing_imputation, VAE, BasicVAE
+from kpi_frame_dataloader import KpiFrameDataLoader
+from kpi_frame_dataset import TimestampDataset, KpiFrameDataset
+from kpi_series import KPISeries
+from evaluation_metric import range_lift_with_delay
+import sklearn
+
+
+def threshold_ml(indicators: np.ndarray, labels: np.ndarray, delay=None, factor=100, prior_best=None, return_statistics=False, return_fscore=False):
+    assert np.shape(indicators) == np.shape(labels), f"indicator and label's shape must be equal. indicator:{np.shape(indicators)}, label:{np.shape(labels)}"
+    assert np.ndim(indicators) == 1, f"indicator and label must be 1-d array like object. indicator:{np.shape(indicators)}"
+    _min, _max = np.min(indicators), np.max(indicators)
+    indicators_ = (indicators - _min) / (_max - _min + 1e-8)
+
+    labeled_idx = np.where(labels != -1)[0]
+    unlabeled_idx = np.where(labels == -1)[0]
+
+    alpha = len(labeled_idx) / len(labels)
+
+    _indicators_labeled = range_lift_with_delay(indicators_[labeled_idx], labels[labeled_idx], delay=delay)
+    _ps, _rs, _ts = sklearn.metrics.precision_recall_curve(labels[labeled_idx], _indicators_labeled)
+    _fs = 2.0 * _ps * _rs / np.clip(_ps + _rs, a_min=1e-4, a_max=None)
+    thresholds = np.concatenate([_ts, [2.0]])
+    f1_scores = _fs
+
+    idx = np.argsort(thresholds)
+    thresholds = thresholds[idx]
+    f1_scores = f1_scores[idx]
+    # print("\nbefore", np.max(f1_scores), thresholds[np.argmax(f1_scores)])
+    # _ts = np.linspace(np.min(thresholds), np.max(thresholds), 10000)
+    _ts = np.linspace(0, 1, 10000)
+    _fs = f1_scores[np.searchsorted(thresholds, _ts, side="left")]
+    thresholds = np.concatenate([_ts, thresholds])
+    f1_scores = np.concatenate([_fs, f1_scores])
+
+    idx = np.argsort(thresholds)[::-1]
+    thresholds = thresholds[idx]
+    f1_scores = f1_scores[idx]
+    # print("after", np.max(f1_scores), thresholds[np.argmax(f1_scores)])
+
+    if len(unlabeled_idx) > 0:
+        if prior_best is None:
+            unlabeled_prior_best = threshold_prior(indicators_[unlabeled_idx])
+        else:
+            unlabeled_prior_best = (prior_best - _min) / (_max - _min)
+        unlabeled_prior = np.abs(thresholds - unlabeled_prior_best)
+        unlabeled_prior = 1. - unlabeled_prior
+        likelihood = (f1_scores * alpha + unlabeled_prior * (1.-alpha))
+    else:
+        likelihood = f1_scores
+    idx = np.argmax(likelihood)
+    # print("f1 score", sklearn.metrics.f1_score(labels[labeled_idx], indicators_[labeled_idx] >= thresholds[idx]))
+    # if idx > 0:
+    #     threshold = (thresholds[idx - 1] * (factor - 1) + thresholds[idx]) / factor
+    # else:
+    threshold = thresholds[idx]
+    # print("f1 score", sklearn.metrics.f1_score(labels[labeled_idx], indicators_[labeled_idx] >= threshold))
+    threshold = threshold * (_max - _min) + _min
+    # print("fscore", sklearn.metrics.f1_score(labels, indicators >= threshold))
+    if return_statistics:
+        return threshold, likelihood, thresholds
+    elif return_fscore:
+        return threshold, np.max(likelihood)
+    else:
+        return threshold
 
 
 class DonutX:
@@ -120,7 +180,7 @@ class DonutX:
         :return:
         """
         with torch.no_grad():
-            with TestLoop(use_cuda=True, print_fn=self.print_fn).with_context() as loop:
+            with TestLoop(use_cuda=self.cuda, print_fn=self.print_fn).with_context() as loop:
                 test_timestamp_dataset = TimestampDataset(kpi, frame_size=self.window_size)
                 test_kpiframe_dataset = KpiFrameDataset(kpi, frame_size=self.window_size, missing_injection_rate=0.0)
                 test_dataloader = KpiFrameDataLoader(VstackDataset(
@@ -171,15 +231,8 @@ class DonutX:
     def detect(self, kpi: KPISeries, train_kpi: KPISeries = None, return_threshold=False):
         indicators = self.predict(kpi)
         indicators_ignore_missing, *_ = ignore_missing(indicators, missing=kpi.missing)
-        if train_kpi is not None:
-            train_indicators = self.predict(train_kpi)
-            train_indicators, train_labels = ignore_missing(train_indicators, train_kpi.label,
-                                                            missing=train_kpi.missing)
-            threshold = threshold_map(np.concatenate([indicators_ignore_missing, train_indicators]),
-                                      np.concatenate(
-                                          [np.ones_like(indicators_ignore_missing, dtype=np.int) * -1, train_labels]))
-        else:
-            threshold = threshold_prior(indicators_ignore_missing)
+        labels_ignore_missing, *_ = ignore_missing(kpi.label, missing=kpi.missing)
+        threshold = threshold_ml(indicators_ignore_missing, labels_ignore_missing)
 
         predict = indicators >= threshold
 
@@ -324,15 +377,8 @@ class Donut:
     def detect(self, kpi: KPISeries, train_kpi: KPISeries = None, return_threshold=False):
         indicators = self.predict(kpi)
         indicators_ignore_missing, *_ = ignore_missing(indicators, missing=kpi.missing)
-        if train_kpi is not None:
-            train_indicators = self.predict(train_kpi)
-            train_indicators, train_labels = ignore_missing(train_indicators, train_kpi.label,
-                                                            missing=train_kpi.missing)
-            threshold = threshold_map(np.concatenate([indicators_ignore_missing, train_indicators]),
-                                      np.concatenate(
-                                          [np.ones_like(indicators_ignore_missing, dtype=np.int) * -1, train_labels]))
-        else:
-            threshold = threshold_prior(indicators_ignore_missing)
+        labels_ignore_missing, *_ = ignore_missing(kpi.label, missing=kpi.missing)
+        threshold = threshold_ml(indicators_ignore_missing, labels_ignore_missing)
 
         predict = indicators >= threshold
 

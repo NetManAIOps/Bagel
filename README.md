@@ -5,8 +5,17 @@ Models are in `model.py`.
 **The module `threshold_selection` is missed. You can replace it with a self-defined threshold.**
 
 # Dependencies
+python >= 3.7
 
-pytorch 0.4
+``` bash
+pip install -r requirements.txt
+```
+
+
+# Run
+``` bash
+python main.py
+```
 
 # Citation
 Li, Zeyan, Wenxiao Chen, and Dan Pei. "Robust and Unsupervised KPI Anomaly Detection Based on Conditional Variational Autoencoder." 2018 IEEE 37th International Performance Computing and Communications Conference (IPCCC). IEEE, 2018.

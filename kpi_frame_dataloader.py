@@ -1,4 +1,3 @@
-import numba
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -14,7 +13,6 @@ class _IndexSampler(object):
         self.batch_size = batch_size
         self.length = length
 
-    @numba.jit()
     def next(self):
         if self.pos + self.batch_size <= self.length:
             data = self.idx[self.pos: self.pos + self.batch_size]
