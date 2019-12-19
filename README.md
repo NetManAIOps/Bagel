@@ -2,8 +2,6 @@
 The implementation of 'Robust and Unsupervised KPI Anomaly Detection Based on Conditional Variational Autoencoder'
 Models are in `model.py`.
 
-**The module `threshold_selection` is missed. You can replace it with a self-defined threshold.**
-
 # Dependencies
 python >= 3.7
 
